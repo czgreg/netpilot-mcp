@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netpilot-mcp"
+version = "0.1.0"
+description = "NetPilot-MCP: 智能网络设备管理 MCP 库，支持大模型通过 Telnet/SSH 管理 Cisco、华为、H3C、锐捷等网络设备"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "NetPilot Team"}
+]
+keywords = ["mcp", "network", "telnet", "ssh", "cisco", "huawei", "h3c", "ruijie", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "telnetlib3>=2.0.0",
+    "asyncssh>=2.14.0",
+]
+
+[project.scripts]
+netpilot-mcp = "netpilot_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/netpilot-mcp/netpilot-mcp"
+Repository = "https://github.com/netpilot-mcp/netpilot-mcp"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

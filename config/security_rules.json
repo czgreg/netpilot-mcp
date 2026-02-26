@@ -1,0 +1,42 @@
+{
+    "dangerous_patterns": [
+        "^\\s*reload\\b",
+        "^\\s*erase\\b",
+        "^\\s*delete\\b",
+        "^\\s*format\\b",
+        "^\\s*write\\s+erase\\b",
+        "^\\s*reset\\s+saved-configuration\\b",
+        "^\\s*restore\\b"
+    ],
+    "sensitive_patterns": [
+        "^\\s*configure\\s+terminal\\b",
+        "^\\s*system-view\\b",
+        "^\\s*interface\\b",
+        "^\\s*ip\\s+address\\b",
+        "^\\s*ip\\s+route\\b",
+        "^\\s*router\\b",
+        "^\\s*no\\s+",
+        "^\\s*undo\\s+",
+        "^\\s*shutdown\\b",
+        "^\\s*switchport\\b",
+        "^\\s*vlan\\b",
+        "^\\s*port\\s+",
+        "^\\s*acl\\b",
+        "^\\s*snmp\\b"
+    ],
+    "safe_patterns": [
+        "^\\s*show\\b",
+        "^\\s*display\\b",
+        "^\\s*ping\\b",
+        "^\\s*traceroute\\b",
+        "^\\s*tracert\\b",
+        "^\\s*terminal\\s+length\\b",
+        "^\\s*screen-length\\b",
+        "^\\s*enable\\b",
+        "^\\s*end\\b",
+        "^\\s*exit\\b",
+        "^\\s*return\\b",
+        "^\\s*quit\\b",
+        "^\\s*\\?\\s*$"
+    ]
+}
