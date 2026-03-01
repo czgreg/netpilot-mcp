@@ -154,10 +154,27 @@ async def device_list_sessions() -> str:
 # ============================================================
 
 
+def _resolve_session_id(session_id: str) -> str:
+    """解析会话 ID：支持在仅有一个活跃会话时自动补全。"""
+    if session_id and session_id.strip():
+        return session_id.strip()
+
+    sessions = session_manager.list_sessions()
+    if len(sessions) == 1:
+        return sessions[0]["session_id"]
+    if len(sessions) == 0:
+        raise ValueError("未提供 session_id，且当前无活跃会话。请先调用 device_connect。")
+
+    ids = [s["session_id"] for s in sessions]
+    raise ValueError(
+        f"未提供 session_id，且存在多个活跃会话: {ids}。请在参数中显式指定 session_id。"
+    )
+
+
 @mcp.tool()
 async def device_execute(
-    session_id: str,
     command: str,
+    session_id: str = "",
     wait_ms: int | None = None,
     expect_prompt: str = "",
 ) -> str:
@@ -167,11 +184,20 @@ async def device_execute(
     会自动检测耗时命令（如 ping、traceroute）并增加等待时间。
 
     Args:
-        session_id: 会话 ID
         command: 要执行的命令
+        session_id: 会话 ID（可选；仅有一个活跃会话时可省略）
         wait_ms: 最大等待时间（毫秒），ping/traceroute 等自动增加
         expect_prompt: 自定义期望提示符（正则表达式）
     """
+    try:
+        session_id = _resolve_session_id(session_id)
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "command": command,
+            "error": str(e),
+        }, ensure_ascii=False)
+
     # 安全检查
     check = command_guard.check(command)
     if not check.allowed:
