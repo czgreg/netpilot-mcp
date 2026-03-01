@@ -180,6 +180,7 @@ async def device_execute(
         audit_logger.log_security_block(session_id, host, command, check.message)
         return json.dumps({
             "success": False,
+            "command": command,
             "security_level": check.level.value,
             "message": check.message,
         }, ensure_ascii=False)
@@ -199,6 +200,7 @@ async def device_execute(
 
         response = {
             "success": result.success,
+            "command": command,
             "output": result.output,
             "structured_output": result.structured_output,
             "structured_status": result.structured_status,
@@ -216,6 +218,7 @@ async def device_execute(
     except Exception as e:
         return json.dumps({
             "success": False,
+            "command": command,
             "error": str(e),
         }, ensure_ascii=False)
 

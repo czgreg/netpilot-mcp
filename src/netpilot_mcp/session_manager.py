@@ -199,14 +199,14 @@ class SessionManager:
         if wait_ms is None:
             wait_ms = driver.get_long_running_timeout() if driver.is_long_running_command(command) else 5000
 
-        prompt = expect_prompt if expect_prompt else driver.combined_prompt_pattern
-
         async with session.lock:
             start_time = time.time()
             raw_output = await transport.execute_command(
                 command=command,
                 read_timeout_ms=wait_ms,
-                expect_prompt=prompt,
+                # 仅在用户显式指定 expect_prompt 时传给 Netmiko；
+                # 默认让 Netmiko 使用自身 prompt 识别，避免正则不匹配导致超时异常。
+                expect_prompt=expect_prompt,
             )
             execution_time = int((time.time() - start_time) * 1000)
 

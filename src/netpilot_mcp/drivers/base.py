@@ -186,7 +186,15 @@ class BaseDriver(ABC):
 
     def is_long_running_command(self, command: str) -> bool:
         """判断是否为耗时命令（ping / traceroute 等）"""
-        long_commands = ["ping", "traceroute", "tracert", "show tech", "display diagnostic"]
+        long_commands = [
+            "ping",
+            "traceroute",
+            "tracert",
+            "show tech",
+            "display diagnostic",
+            "show ip route",
+            "display ip routing-table",
+        ]
         cmd_lower = command.strip().lower()
         return any(cmd_lower.startswith(lc) for lc in long_commands)
 
