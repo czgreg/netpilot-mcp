@@ -14,6 +14,7 @@ NetPilot-MCP 是一个基于 [Model Context Protocol (MCP)](https://modelcontext
 - **双协议支持** — 同时支持 Telnet 和 SSH
 - **多厂商兼容** — Cisco IOS、华为 VRP、H3C Comware、锐捷 RGOS
 - **智能识别** — 自动检测设备类型、提示符、操作模式
+- **Netmiko 引擎** — 统一 SSH/Telnet 传输层，提升交互稳定性
 - **安全控制** — 命令三级分级（安全/敏感/危险）、危险命令拦截
 - **审计日志** — 完整记录所有设备操作，自动脱敏密码
 - **即装即用** — pip 安装，一行配置即可集成 AI 客户端
@@ -67,6 +68,13 @@ netpilot-mcp
 ```bash
 export NETPILOT_USERNAME=admin
 export NETPILOT_PASSWORD=your_password
+export NETPILOT_ENABLE_PASSWORD=enable_secret
+# SSH host key 严格校验（默认 true）
+export NETPILOT_SSH_STRICT_HOST_KEY=true
+# 自定义 known_hosts 文件（可选）
+export NETPILOT_KNOWN_HOSTS_FILE=$HOME/.ssh/known_hosts
+# 是否允许 Telnet（默认 true，可在生产关闭）
+export NETPILOT_ALLOW_TELNET=true
 ```
 
 ## MCP Tools
@@ -82,6 +90,37 @@ export NETPILOT_PASSWORD=your_password
 | `device_get_config` | 信息查询 | 获取设备配置 |
 | `device_ping` | 网络诊断 | Ping 测试 |
 | `device_traceroute` | 网络诊断 | 路由追踪 |
+
+### 结构化输出模式（面向大模型）
+
+`device_execute` / `device_get_info` / `device_get_config` / `device_ping` / `device_traceroute`  
+在保留 `output` 原始文本的同时，新增以下字段：
+
+- `structured_output`: 结构化 JSON（命中模板时）
+- `structured_status`: `ok` / `unsupported` / `empty`
+- `structured_parser`: 命中的解析器名称
+
+当前优先支持：
+- `show ip interface brief`
+- `display ip interface brief`
+- `show version` / `display version`
+- `show ip route` / `display ip routing-table`
+- `show arp` / `display arp`
+
+解析策略：
+- 第一优先：`ntc-templates`（模板化解析，覆盖更广）
+- 回退策略：内置解析器（保证核心命令稳定可用）
+
+### 返回字段（推荐大模型优先使用）
+
+- `output`: 原始文本输出（始终保留）
+- `structured_status`: 结构化状态
+- `structured_parser`: 结构化解析器来源
+- `structured_output`: 可直接消费的 JSON 结构
+
+`device_connect` 额外返回：
+- `netmiko_device_type`: 实际使用的 Netmiko 设备类型
+- `security_notice`: 当使用 Telnet 时返回安全提示
 
 ## 支持设备
 
@@ -190,6 +229,7 @@ AI 自动执行：
 
 - Telnet 为明文传输，仅建议在**实验环境和内网**使用
 - 生产环境请使用 **SSH** 协议
+- SSH 默认启用 host key 校验，可通过 `NETPILOT_SSH_STRICT_HOST_KEY` 调整
 - 危险命令（reload、erase 等）会被自动拦截
 
 ## License

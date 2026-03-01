@@ -1,22 +1,26 @@
-"""会话管理器：管理多设备的连接会话"""
+"""会话管理器：管理多设备连接会话（Netmiko 实现）"""
 
-import uuid
-import time
+from __future__ import annotations
+
+import asyncio
+import os
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 
-from .utils.output_parser import OutputParser
+from netmiko import SSHDetect
 
-from .transport.base import BaseTransport
-from .transport.telnet_transport import TelnetTransport
-from .transport.ssh_transport import SSHTransport
-from .drivers.base import BaseDriver, DeviceMode, CommandResult, DeviceInfo
+from .drivers.base import BaseDriver, CommandResult, DeviceMode
 from .drivers.cisco_ios import CiscoIOSDriver
-from .drivers.huawei_vrp import HuaweiVRPDriver
-from .drivers.h3c_comware import H3CComwareDriver
-from .drivers.ruijie_rgos import RuijieRGOSDriver
 from .drivers.generic import GenericDriver
-
+from .drivers.h3c_comware import H3CComwareDriver
+from .drivers.huawei_vrp import HuaweiVRPDriver
+from .drivers.ruijie_rgos import RuijieRGOSDriver
+from .transport.base import BaseTransport
+from .transport.netmiko_transport import HostKeyPolicy, NetmikoTransport
+from .utils.output_parser import OutputParser
+from .utils.structured_output import StructuredOutputParser
 
 # 设备类型 → 驱动映射
 DRIVER_MAP: dict[str, type[BaseDriver]] = {
@@ -40,20 +44,31 @@ AUTO_DETECT_KEYWORDS: list[tuple[str, str]] = [
     ("RGOS", "ruijie_rgos"),
 ]
 
+INTERNAL_TO_NETMIKO: dict[str, str] = {
+    "cisco_ios": "cisco_ios",
+    "huawei_vrp": "huawei",
+    "h3c_comware": "hp_comware",
+    "ruijie_rgos": "ruijie_os",
+    "generic": "generic",
+}
+
 
 @dataclass
 class Session:
     """单个设备连接会话"""
+
     session_id: str
     host: str
     port: int
     protocol: str
     device_type: str
+    netmiko_device_type: str
     transport: BaseTransport
     driver: BaseDriver
     device_mode: str = ""
     hostname: str = ""
     connected_at: float = field(default_factory=time.time)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class SessionManager:
@@ -73,98 +88,84 @@ class SessionManager:
         device_type: str = "auto",
         timeout: int = 5000,
     ) -> dict:
-        """
-        创建新的设备连接会话。
+        """创建新的设备连接会话"""
+        protocol = protocol.lower().strip()
+        if protocol not in {"ssh", "telnet"}:
+            raise ValueError("protocol 仅支持 ssh 或 telnet")
 
-        Returns:
-            包含 session_id、device_mode、device_info 的字典
-        """
-        # 确定端口号
         if port is None:
             port = 23 if protocol == "telnet" else 22
 
-        # 创建传输层
-        if protocol == "ssh":
-            transport = SSHTransport(host, port, timeout)
-        else:
-            transport = TelnetTransport(host, port, timeout)
+        if protocol == "telnet" and not self._telnet_enabled():
+            raise PermissionError("Telnet 已禁用，请使用 SSH 或设置 NETPILOT_ALLOW_TELNET=true")
 
-        # 建立连接
+        host_key_policy = HostKeyPolicy(
+            strict=self._strict_host_key_enabled(),
+            known_hosts_file=os.environ.get("NETPILOT_KNOWN_HOSTS_FILE", "").strip(),
+        )
+
+        internal_device_type, netmiko_device_type = await self._resolve_device_types(
+            host=host,
+            port=port,
+            protocol=protocol,
+            username=username,
+            password=password,
+            timeout=timeout,
+            requested_device_type=device_type,
+            host_key_policy=host_key_policy,
+        )
+
+        transport = NetmikoTransport(
+            host=host,
+            port=port,
+            timeout=timeout,
+            netmiko_device_type=netmiko_device_type,
+            protocol=protocol,
+            host_key_policy=host_key_policy,
+        )
+
         initial_output = await transport.connect(username, password, enable_password)
-
-        # 清洗 ANSI 控制字符
         initial_output = OutputParser.remove_ansi_codes(initial_output)
         initial_output = OutputParser.remove_carriage_returns(initial_output)
 
-        # 确定设备驱动
-        if device_type == "auto":
-            device_type = self._auto_detect_device_type(initial_output)
+        # Telnet auto 情况下，连接后基于提示符再做一次兜底识别
+        if device_type == "auto" and protocol == "telnet":
+            internal_device_type = self._auto_detect_device_type(initial_output)
+            netmiko_device_type = self._internal_to_netmiko(internal_device_type, protocol)
 
-        driver_cls = DRIVER_MAP.get(device_type, GenericDriver)
+        driver_cls = DRIVER_MAP.get(internal_device_type, GenericDriver)
         driver = driver_cls()
 
-        # 发送空行获取干净的提示符
-        await transport.send("\r\n")
-        prompt_output = await transport.read_until_prompt(
-            driver.combined_prompt_pattern, timeout_ms=3000
-        )
+        # 先尝试进入特权模式，再禁用分页，提升后续命令稳定性
+        if driver.get_enter_enable_command():
+            try:
+                await transport.enable()
+            except Exception:
+                pass
+
+        disable_paging_cmd = driver.get_disable_paging_command()
+        if disable_paging_cmd:
+            try:
+                await transport.execute_command(disable_paging_cmd, read_timeout_ms=5000)
+            except Exception:
+                pass
+
+        prompt_output = await transport.find_prompt()
         prompt_output = OutputParser.remove_ansi_codes(prompt_output)
         prompt_output = OutputParser.remove_carriage_returns(prompt_output)
 
-        # 检测当前设备模式（用清洗后的提示符输出）
         detect_text = prompt_output if prompt_output.strip() else initial_output
         device_mode = driver.detect_mode(detect_text)
         hostname = driver.extract_hostname(detect_text)
 
-        # 如果设备处于配置模式（华为/H3C 初始可能进入 console 配置视图），先退回
-        if device_mode in (DeviceMode.CONFIG, DeviceMode.CONFIG_IF, DeviceMode.CONFIG_SUB):
-            # 华为/H3C 用 return 退到用户视图，Cisco/锐捷用 end
-            exit_cmds = ["return", "return", "quit"]
-            for exit_cmd in exit_cmds:
-                await transport.send(exit_cmd + "\r\n")
-                exit_output = await transport.read_until_prompt(
-                    driver.combined_prompt_pattern, timeout_ms=3000
-                )
-                exit_output = OutputParser.remove_ansi_codes(exit_output)
-                exit_output = OutputParser.remove_carriage_returns(exit_output)
-                device_mode = driver.detect_mode(exit_output)
-                if device_mode in (DeviceMode.USER, DeviceMode.PRIVILEGED):
-                    hostname = driver.extract_hostname(exit_output)
-                    break
-
-        # 禁用分页
-        disable_paging_cmd = driver.get_disable_paging_command()
-        if disable_paging_cmd:
-            await transport.send(disable_paging_cmd + "\r\n")
-            await transport.read_until_prompt(
-                driver.combined_prompt_pattern, timeout_ms=3000
-            )
-
-        # 如果在用户模式，且有 enable 命令，尝试进入特权模式
-        if device_mode == DeviceMode.USER and driver.get_enter_enable_command():
-            await transport.send(driver.get_enter_enable_command() + "\r\n")
-            enable_output = await transport.read_until_prompt(
-                driver.combined_prompt_pattern + r"|[Pp]assword", timeout_ms=3000
-            )
-            # 如果需要 enable 密码
-            if re.search(r"[Pp]assword", enable_output):
-                if enable_password:
-                    await transport.send(enable_password + "\r\n")
-                    enable_output = await transport.read_until_prompt(
-                        driver.combined_prompt_pattern, timeout_ms=3000
-                    )
-            device_mode = driver.detect_mode(enable_output)
-
-        # 生成会话 ID
         session_id = str(uuid.uuid4())[:8]
-
-        # 保存会话
         session = Session(
             session_id=session_id,
             host=host,
             port=port,
             protocol=protocol,
-            device_type=device_type,
+            device_type=internal_device_type,
+            netmiko_device_type=netmiko_device_type,
             transport=transport,
             driver=driver,
             device_mode=device_mode.value,
@@ -175,7 +176,8 @@ class SessionManager:
         return {
             "session_id": session_id,
             "device_mode": device_mode.value,
-            "device_type": device_type,
+            "device_type": internal_device_type,
+            "netmiko_device_type": netmiko_device_type,
             "hostname": hostname,
             "protocol": protocol,
             "host": host,
@@ -194,46 +196,41 @@ class SessionManager:
         driver = session.driver
         transport = session.transport
 
-        # 计算超时
         if wait_ms is None:
-            if driver.is_long_running_command(command):
-                wait_ms = driver.get_long_running_timeout()
-            else:
-                wait_ms = 5000  # 默认 5 秒，避免 show version 等命令超时
+            wait_ms = driver.get_long_running_timeout() if driver.is_long_running_command(command) else 5000
 
-        # 确定提示符模式
         prompt = expect_prompt if expect_prompt else driver.combined_prompt_pattern
 
-        # 清空缓冲区残留数据，防止上一条命令的输出串流
-        try:
-            await transport.read_available(timeout_ms=200)
-        except Exception:
-            pass
+        async with session.lock:
+            start_time = time.time()
+            raw_output = await transport.execute_command(
+                command=command,
+                read_timeout_ms=wait_ms,
+                expect_prompt=prompt,
+            )
+            execution_time = int((time.time() - start_time) * 1000)
 
-        # 发送命令
-        start_time = time.time()
-        await transport.send(command + "\r\n")
+            clean_raw = OutputParser.remove_ansi_codes(raw_output)
+            clean_raw = OutputParser.remove_carriage_returns(clean_raw)
+            cleaned_output = driver.clean_output(clean_raw, command)
+            structured = StructuredOutputParser.parse(command, cleaned_output, device_type=session.device_type)
 
-        # 读取输出
-        raw_output = await transport.read_until_prompt(prompt, timeout_ms=wait_ms)
-
-        execution_time = int((time.time() - start_time) * 1000)
-
-        # 清洗 ANSI 控制字符
-        clean_raw = OutputParser.remove_ansi_codes(raw_output)
-        clean_raw = OutputParser.remove_carriage_returns(clean_raw)
-
-        # 清洗输出
-        cleaned_output = driver.clean_output(clean_raw, command)
-
-        # 检测当前模式
-        device_mode = driver.detect_mode(clean_raw)
-        session.device_mode = device_mode.value
+            device_mode = driver.detect_mode(clean_raw)
+            if device_mode == DeviceMode.UNKNOWN:
+                try:
+                    prompt_output = await transport.find_prompt()
+                    device_mode = driver.detect_mode(prompt_output)
+                except Exception:
+                    pass
+            session.device_mode = device_mode.value
 
         return CommandResult(
             success=True,
             output=cleaned_output,
-            device_mode=device_mode.value,
+            structured_output=structured.data,
+            structured_status=structured.status,
+            structured_parser=structured.parser,
+            device_mode=session.device_mode,
             execution_time_ms=execution_time,
         )
 
@@ -247,47 +244,36 @@ class SessionManager:
         session = self._get_session(session_id)
         driver = session.driver
         transport = session.transport
-        prompt = driver.combined_prompt_pattern
-
         results: list[dict] = []
 
-        # 进入配置模式
-        config_cmd = driver.get_enter_config_command()
-        if config_cmd:
-            await transport.send(config_cmd + "\r\n")
-            await transport.read_until_prompt(prompt, timeout_ms=3000)
+        async with session.lock:
+            # 逐条配置，保留每条命令结果，兼容原有 MCP 输出结构
+            for idx, cmd in enumerate(commands):
+                output = await transport.send_config_set(
+                    [cmd],
+                    read_timeout_ms=10000,
+                    enter_config_mode=(idx == 0),
+                    exit_config_mode=False,
+                )
+                clean_raw = OutputParser.remove_ansi_codes(output)
+                clean_raw = OutputParser.remove_carriage_returns(clean_raw)
+                cleaned = driver.clean_output(clean_raw, cmd)
+                results.append({"command": cmd, "output": cleaned})
 
-        # 逐条执行配置命令
-        for cmd in commands:
-            await transport.send(cmd + "\r\n")
-            output = await transport.read_until_prompt(prompt, timeout_ms=3000)
-            cleaned = driver.clean_output(output, cmd)
-            results.append({"command": cmd, "output": cleaned})
+            exit_cmd = driver.get_exit_config_command()
+            if exit_cmd:
+                await transport.execute_command(exit_cmd, read_timeout_ms=5000)
 
-        # 退出配置模式
-        exit_cmd = driver.get_exit_config_command()
-        if exit_cmd:
-            await transport.send(exit_cmd + "\r\n")
-            await transport.read_until_prompt(prompt, timeout_ms=3000)
+            if save_config:
+                save_cmd = driver.get_save_config_command()
+                await transport.save_config(save_cmd)
 
-        # 保存配置
-        if save_config:
-            save_cmd = driver.get_save_config_command()
-            await transport.send(save_cmd + "\r\n")
-            save_output = await transport.read_until_prompt(
-                prompt + r"|confirm|Y/N|\[Y\]",
-                timeout_ms=10000,
-            )
-            # 处理确认提示
-            if re.search(r"confirm|Y/N|\[Y\]", save_output, re.IGNORECASE):
-                await transport.send("y\r\n")
-                await transport.read_until_prompt(prompt, timeout_ms=10000)
-
-        # 更新当前模式
-        mode_output = await transport.read_available(timeout_ms=500)
-        all_output = mode_output
-        device_mode = driver.detect_mode(all_output) if all_output else DeviceMode.PRIVILEGED
-        session.device_mode = device_mode.value
+            try:
+                prompt = await transport.find_prompt()
+                mode = driver.detect_mode(prompt)
+            except Exception:
+                mode = DeviceMode.PRIVILEGED
+            session.device_mode = mode.value
 
         return {
             "results": results,
@@ -296,7 +282,7 @@ class SessionManager:
         }
 
     async def disconnect_session(self, session_id: str) -> dict:
-        """断开指定的会话"""
+        """断开指定会话"""
         session = self._get_session(session_id)
         await session.transport.disconnect()
         del self._sessions[session_id]
@@ -311,38 +297,127 @@ class SessionManager:
                 "port": s.port,
                 "protocol": s.protocol,
                 "device_type": s.device_type,
+                "netmiko_device_type": s.netmiko_device_type,
                 "hostname": s.hostname,
                 "device_mode": s.device_mode,
-                "connected_at": time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(s.connected_at)
-                ),
+                "connected_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(s.connected_at)),
             }
             for s in self._sessions.values()
         ]
 
     def _get_session(self, session_id: str) -> Session:
-        """获取会话，不存在则抛异常"""
         if session_id not in self._sessions:
-            raise ValueError(
-                f"会话 {session_id} 不存在。"
-                f"当前活跃会话: {list(self._sessions.keys()) or '无'}"
-            )
+            raise ValueError(f"会话 {session_id} 不存在。当前活跃会话: {list(self._sessions.keys()) or '无'}")
         return self._sessions[session_id]
 
+    async def _resolve_device_types(
+        self,
+        host: str,
+        port: int,
+        protocol: str,
+        username: str,
+        password: str,
+        timeout: int,
+        requested_device_type: str,
+        host_key_policy: HostKeyPolicy,
+    ) -> tuple[str, str]:
+        requested = requested_device_type.lower().strip()
+        if requested and requested != "auto":
+            internal = requested if requested in DRIVER_MAP else "generic"
+            return internal, self._internal_to_netmiko(internal, protocol)
+
+        # auto
+        if protocol == "ssh":
+            try:
+                detected = await self._detect_by_ssh(
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    timeout=timeout,
+                    host_key_policy=host_key_policy,
+                )
+                internal = self._netmiko_to_internal(detected)
+                return internal, detected
+            except Exception:
+                pass
+
+        return "generic", self._internal_to_netmiko("generic", protocol)
+
+    async def _detect_by_ssh(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        timeout: int,
+        host_key_policy: HostKeyPolicy,
+    ) -> str:
+        timeout_sec = max(timeout / 1000.0, 1.0)
+        kwargs = {
+            "device_type": "autodetect",
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "conn_timeout": timeout_sec,
+            "banner_timeout": timeout_sec,
+            "auth_timeout": timeout_sec,
+        }
+        if host_key_policy.strict:
+            kwargs["ssh_strict"] = True
+            kwargs["system_host_keys"] = True
+            if host_key_policy.known_hosts_file:
+                kwargs["alt_host_keys"] = True
+                kwargs["alt_key_file"] = host_key_policy.known_hosts_file
+        else:
+            kwargs["ssh_strict"] = False
+            kwargs["system_host_keys"] = False
+
+        detector = await asyncio.to_thread(SSHDetect, **kwargs)
+        detected = await asyncio.to_thread(detector.autodetect)
+        if not detected:
+            return "generic"
+        return detected
+
+    def _internal_to_netmiko(self, internal_device_type: str, protocol: str) -> str:
+        base = INTERNAL_TO_NETMIKO.get(internal_device_type, "generic")
+        return f"{base}_telnet" if protocol == "telnet" else base
+
+    def _netmiko_to_internal(self, netmiko_device_type: str) -> str:
+        normalized = netmiko_device_type.strip().lower()
+        if normalized.endswith("_telnet"):
+            normalized = normalized[: -len("_telnet")]
+
+        if normalized.startswith("cisco_ios"):
+            return "cisco_ios"
+        if normalized.startswith("huawei"):
+            return "huawei_vrp"
+        if normalized.startswith("hp_comware"):
+            return "h3c_comware"
+        if normalized.startswith("ruijie_os"):
+            return "ruijie_rgos"
+        return "generic"
+
     def _auto_detect_device_type(self, output: str) -> str:
-        """根据初始输出自动识别设备类型"""
         for keyword, device_type in AUTO_DETECT_KEYWORDS:
             if keyword.lower() in output.lower():
                 return device_type
 
-        # 通过提示符格式推测
         stripped = output.strip()
         if stripped:
             last_line = stripped.split("\n")[-1].strip()
-            if re.search(r"<\S+>", last_line):
-                # <hostname> 风格 → 华为/H3C
-                return "huawei_vrp"
-            elif re.search(r"\[\S+\]", last_line):
+            if re.search(r"<\S+>", last_line) or re.search(r"\[\S+\]", last_line):
                 return "huawei_vrp"
 
         return "generic"
+
+    @staticmethod
+    def _strict_host_key_enabled() -> bool:
+        value = os.environ.get("NETPILOT_SSH_STRICT_HOST_KEY", "true").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _telnet_enabled() -> bool:
+        value = os.environ.get("NETPILOT_ALLOW_TELNET", "true").strip().lower()
+        return value in {"1", "true", "yes", "on"}

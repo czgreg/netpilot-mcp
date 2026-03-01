@@ -69,6 +69,8 @@ async def device_connect(
         username = os.environ.get("NETPILOT_USERNAME", "")
     if not password:
         password = os.environ.get("NETPILOT_PASSWORD", "")
+    if not enable_password:
+        enable_password = os.environ.get("NETPILOT_ENABLE_PASSWORD", "")
 
     try:
         result = await session_manager.create_session(
@@ -86,15 +88,19 @@ async def device_connect(
             result["session_id"], host, result["port"], protocol, result["device_type"]
         )
 
-        return json.dumps({
+        response = {
             "success": True,
             "session_id": result["session_id"],
             "device_mode": result["device_mode"],
             "device_type": result["device_type"],
+            "netmiko_device_type": result["netmiko_device_type"],
             "hostname": result["hostname"],
             "protocol": result["protocol"],
             "message": f"已通过 {protocol.upper()} 连接到 {host}:{result['port']}",
-        }, ensure_ascii=False)
+        }
+        if protocol.lower() == "telnet":
+            response["security_notice"] = "Telnet 为明文传输，仅建议在实验环境和受控内网使用"
+        return json.dumps(response, ensure_ascii=False)
 
     except Exception as e:
         return json.dumps({
@@ -194,6 +200,9 @@ async def device_execute(
         response = {
             "success": result.success,
             "output": result.output,
+            "structured_output": result.structured_output,
+            "structured_status": result.structured_status,
+            "structured_parser": result.structured_parser,
             "device_mode": result.device_mode,
             "execution_time_ms": result.execution_time_ms,
         }
@@ -294,6 +303,9 @@ async def device_get_info(
             "info_type": info_type,
             "command": command,
             "output": result.output,
+            "structured_output": result.structured_output,
+            "structured_status": result.structured_status,
+            "structured_parser": result.structured_parser,
             "device_mode": result.device_mode,
         }, ensure_ascii=False)
 
@@ -334,6 +346,9 @@ async def device_get_config(
             "section": section or "全部",
             "command": command,
             "output": result.output,
+            "structured_output": result.structured_output,
+            "structured_status": result.structured_status,
+            "structured_parser": result.structured_parser,
         }, ensure_ascii=False)
 
     except Exception as e:
@@ -379,6 +394,9 @@ async def device_ping(
             "target": target,
             "command": command,
             "output": result.output,
+            "structured_output": result.structured_output,
+            "structured_status": result.structured_status,
+            "structured_parser": result.structured_parser,
         }, ensure_ascii=False)
 
     except Exception as e:
@@ -415,6 +433,9 @@ async def device_traceroute(
             "target": target,
             "command": command,
             "output": result.output,
+            "structured_output": result.structured_output,
+            "structured_status": result.structured_status,
+            "structured_parser": result.structured_parser,
         }, ensure_ascii=False)
 
     except Exception as e:

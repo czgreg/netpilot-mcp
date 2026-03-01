@@ -73,6 +73,33 @@ class BaseTransport(ABC):
         """断开连接"""
         pass
 
+    async def execute_command(
+        self,
+        command: str,
+        read_timeout_ms: int = 5000,
+        expect_prompt: str = "",
+    ) -> str:
+        """执行单条命令。默认由子类按需实现。"""
+        raise NotImplementedError
+
+    async def send_config_set(
+        self,
+        commands: list[str],
+        read_timeout_ms: int = 10000,
+        enter_config_mode: bool = True,
+        exit_config_mode: bool = True,
+    ) -> str:
+        """执行配置命令集合。默认由子类按需实现。"""
+        raise NotImplementedError
+
+    async def save_config(self, cmd: str = "") -> str:
+        """保存配置。默认由子类按需实现。"""
+        raise NotImplementedError
+
+    async def find_prompt(self) -> str:
+        """获取当前设备提示符。默认由子类按需实现。"""
+        raise NotImplementedError
+
     @property
     def protocol(self) -> str:
         """返回协议名称"""

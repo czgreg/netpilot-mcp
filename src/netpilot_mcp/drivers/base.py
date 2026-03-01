@@ -38,6 +38,9 @@ class CommandResult:
     """命令执行结果"""
     success: bool = True
     output: str = ""
+    structured_output: dict | list | None = None
+    structured_status: str = "unsupported"
+    structured_parser: str = "none"
     device_mode: str = ""
     error: str = ""
     execution_time_ms: int = 0

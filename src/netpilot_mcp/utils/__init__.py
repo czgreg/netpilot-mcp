@@ -2,5 +2,6 @@
 
 from .prompt_detector import PromptDetector
 from .output_parser import OutputParser
+from .structured_output import StructuredOutputParser
 
-__all__ = ["PromptDetector", "OutputParser"]
+__all__ = ["PromptDetector", "OutputParser", "StructuredOutputParser"]
